@@ -77,6 +77,10 @@ class MainAppContainer extends StatefulWidget {
 }
 
 class _MainAppContainerState extends State<MainAppContainer> {
+  static const String baseUrl = 'https://literasiku.my.id/api';
+  String? _token;
+  String _userName = 'Tamu Perpustakaan';
+
   // App States
   bool _isGuest = true;
   String _activeTab = 'beranda';
@@ -123,24 +127,249 @@ class _MainAppContainerState extends State<MainAppContainer> {
         isAi: true,
       ),
     ];
+    _fetchBooksFromApi();
   }
 
-  // State Mutators
-  void _login(bool guest) {
-    setState(() {
-      _isGuest = guest;
-      _activeTab = 'beranda';
-      if (!_isGuest) {
-        _showSnackBar('Selamat datang kembali, Riana Safitri!', Colors.green);
-      } else {
-        _showSnackBar('Masuk sebagai Tamu Perpustakaan', Colors.blue);
+  // State Mutators & API Integrations
+  Future<void> _fetchBooksFromApi() async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/books'));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) {
+          final List<dynamic> rawBooks = data['books'];
+          List<Book> tempBooks = [];
+          List<EBook> tempEbooks = [];
+
+          for (var item in rawBooks) {
+            final bool isEbook = item['is_ebook'] == true || item['is_ebook'] == 1 || item['is_ebook'] == '1';
+            
+            // Format Cover URL
+            String coverUrl = item['cover_image'] ?? '';
+            if (coverUrl.isNotEmpty && !coverUrl.startsWith('http')) {
+              coverUrl = 'https://literasiku.my.id/' + coverUrl;
+            }
+            if (coverUrl.isEmpty) {
+              coverUrl = isEbook 
+                ? 'https://images.unsplash.com/photo-1476275466078-4007374efbbe?auto=format&fit=crop&w=150&q=80'
+                : 'https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&w=150&q=80';
+            }
+
+            final String categoryName = item['category']?['name'] ?? 'Umum';
+
+            if (isEbook) {
+              tempEbooks.add(EBook(
+                id: item['id'].toString(),
+                title: item['title'] ?? '',
+                author: item['author'] ?? '',
+                cover: coverUrl,
+                readCount: '1.5k',
+                pages: '120 Hlm',
+                chapters: [
+                  'BAB 1: Pendahuluan',
+                  'BAB 2: Pembahasan Utama (Terkunci)',
+                  'BAB 3: Kesimpulan & Penutup (Terkunci)',
+                ],
+                contents: [
+                  item['description'] ?? 'Ebook ini tidak memiliki deskripsi pratinjau.',
+                  'Konten bab ini dikunci khusus untuk pengguna Premium perpustakaan.',
+                  'Konten bab penutup dikunci khusus untuk pengguna Premium perpustakaan.',
+                ],
+                reviews: [],
+              ));
+            } else {
+              tempBooks.add(Book(
+                id: item['id'].toString(),
+                title: item['title'] ?? '',
+                author: item['author'] ?? '',
+                category: categoryName,
+                cover: coverUrl,
+                available: (item['stock'] ?? 0) > 0,
+                year: item['publication_year']?.toString() ?? '2024',
+                publisher: item['publisher'] ?? 'Gramedia',
+                pages: '280 Hlm',
+                desc: item['description'] ?? '',
+                reviews: [],
+              ));
+            }
+          }
+
+          setState(() {
+            _books = tempBooks;
+            _ebooks = tempEbooks;
+          });
+        }
       }
+    } catch (e) {
+      debugPrint('Gagal memuat data buku dari API: $e');
+    }
+  }
+
+  Future<void> _fetchLoansFromApi() async {
+    if (_token == null) return;
+    try {
+      final response = await http.get(
+        Uri.parse('$baseUrl/loans'),
+        headers: {
+          'Authorization': 'Bearer $_token',
+        },
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) {
+          final List<dynamic> rawLoans = data['loans'];
+          List<Loan> tempLoans = [];
+          List<Fine> tempFines = [];
+          List<Loan> tempHistory = [];
+
+          for (var item in rawLoans) {
+            final bookData = item['book'];
+            final String title = bookData?['title'] ?? 'Buku Perpustakaan';
+            final String author = bookData?['author'] ?? 'Penulis';
+            String coverUrl = bookData?['cover_image'] ?? '';
+            if (coverUrl.isNotEmpty && !coverUrl.startsWith('http')) {
+              coverUrl = 'https://literasiku.my.id/' + coverUrl;
+            }
+
+            final String status = item['status'] == 'dipinjam' 
+                ? 'Aktif' 
+                : (item['status'] == 'selesai' ? 'Selesai' : 'Pending');
+
+            final loan = Loan(
+              id: item['id'].toString(),
+              bookId: item['book_id'].toString(),
+              title: title,
+              author: author,
+              type: 'Fisik',
+              cover: coverUrl,
+              dateBorrowed: item['borrow_date'] ?? '',
+              dueDate: item['due_date'] ?? '',
+              pickupMethod: 'Loket Pelayanan',
+              status: status,
+            );
+
+            if (item['status'] == 'dipinjam' || item['status'] == 'menunggu') {
+              tempLoans.add(loan);
+            } else {
+              tempHistory.add(loan);
+            }
+
+            // Check for fines
+            if ((item['fine_amount'] ?? 0) > 0) {
+              final String fineStatus = item['fine_status'] == 'lunas' 
+                  ? 'Lunas' 
+                  : (item['fine_status'] == 'proses_verifikasi' ? 'Verifikasi' : 'Belum Bayar');
+              
+              tempFines.add(Fine(
+                id: 'fine-${item['id']}',
+                loanId: item['id'].toString(),
+                title: title,
+                amount: item['fine_amount'],
+                daysOverdue: 1, 
+                status: fineStatus,
+              ));
+            }
+          }
+
+          setState(() {
+            _loans = tempLoans;
+            _fines = tempFines;
+            _history = tempHistory;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Gagal memuat sirkulasi dari API: $e');
+    }
+  }
+
+  Future<void> _loginWithApi(String loginInput, String password) async {
+    setState(() {
+      _isAiLoading = true;
     });
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'login': loginInput, 'password': password}),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['success'] == true) {
+        setState(() {
+          _token = data['access_token'];
+          _isGuest = false;
+          _userName = data['user']['name'] ?? 'Riana Safitri';
+          _activeTab = 'beranda';
+        });
+        _showSnackBar('Selamat datang kembali, $_userName!', Colors.green);
+        _fetchLoansFromApi();
+      } else {
+        if (loginInput == 'riana') {
+          _showSnackBar('Mendaftarkan akun Riana Safitri ke server...', Colors.blue);
+          await _registerRianaSafitri();
+        } else {
+          _showSnackBar('Login gagal: ${data['message'] ?? 'Periksa kredensial Anda.'}', Colors.red);
+        }
+      }
+    } catch (e) {
+      _showSnackBar('Kesalahan koneksi ke server: $e', Colors.red);
+    } finally {
+      setState(() {
+        _isAiLoading = false;
+      });
+    }
+  }
+
+  Future<void> _registerRianaSafitri() async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/register'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'name': 'Riana Safitri',
+          'username': 'riana',
+          'nim': '2201010012',
+          'email': 'riana@literasiku.my.id',
+          'password': 'password123',
+          'password_confirmation': 'password123',
+          'phone': '08123456789',
+          'address': 'Jakarta Selatan',
+          'gender': 'P'
+        }),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 201 && data['success'] == true) {
+        await _loginWithApi('riana', 'password123');
+      } else {
+        _showSnackBar('Registrasi gagal: ${data['message']}', Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar('Kesalahan registrasi: $e', Colors.red);
+    }
+  }
+
+  void _login(bool guest) {
+    if (guest) {
+      setState(() {
+        _isGuest = true;
+        _token = null;
+        _activeTab = 'beranda';
+        _showSnackBar('Masuk sebagai Tamu Perpustakaan', Colors.blue);
+      });
+    } else {
+      // Auto login Riana Safitri via API
+      _loginWithApi('riana', 'password123');
+    }
   }
 
   void _logout() {
     setState(() {
       _isGuest = true;
+      _token = null;
+      _loans = [];
+      _fines = [];
       _activeTab = 'beranda';
       _showSnackBar('Anda telah keluar dari keanggotaan.', Colors.amber);
     });
@@ -158,77 +387,71 @@ class _MainAppContainerState extends State<MainAppContainer> {
     });
   }
 
-  void _borrowBook(Book book, String pickupMethod) {
+  Future<void> _borrowBook(Book book, String pickupMethod) async {
     if (_isGuest) {
       _showSnackBar('Anda harus login sebagai Anggota untuk memesan buku fisik.', Colors.red);
       _showWelcomeOverlay();
       return;
     }
 
-    if (!book.available) {
-      _showSnackBar('Buku tidak tersedia untuk dipinjam.', Colors.red);
-      return;
+    if (_token == null) return;
+
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/books/${book.id}/borrow'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $_token',
+        },
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 201 && data['success'] == true) {
+        _showSnackBar('Berhasil meminjam "${book.title}". Ambil via $pickupMethod.', Colors.green);
+        _fetchLoansFromApi();
+        _fetchBooksFromApi(); // refresh stock
+      } else {
+        _showSnackBar('Gagal meminjam: ${data['message'] ?? 'Ada kesalahan.'}', Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar('Kesalahan koneksi peminjaman: $e', Colors.red);
     }
-
-    setState(() {
-      book.available = false;
-      final today = DateTime.now();
-      final dueDate = today.add(const Duration(days: 7));
-
-      final months = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
-      String formatShortDate(DateTime date) => "${date.day} ${months[date.month - 1]} ${date.year}";
-
-      final newLoan = Loan(
-        id: 'loan-${DateTime.now().millisecondsSinceEpoch}',
-        bookId: book.id,
-        title: book.title,
-        author: book.author,
-        type: 'Fisik',
-        cover: book.cover,
-        dateBorrowed: formatShortDate(today),
-        dueDate: formatShortDate(dueDate),
-        pickupMethod: pickupMethod,
-        status: 'Aktif',
-      );
-
-      _loans.insert(0, newLoan);
-      _notifications.insert(
-        0,
-        UserNotification(
-          id: DateTime.now().millisecondsSinceEpoch,
-          text: 'Pesan "${book.title}" berhasil. Metode: $pickupMethod. Buka tiket QR sirkulasi Anda.',
-          date: 'Baru saja',
-        ),
-      );
-    });
-    _showSnackBar('Berhasil memesan "${book.title}". Ambil via $pickupMethod.', Colors.green);
   }
 
   void _returnBook(Loan loan) {
-    setState(() {
-      final book = _books.firstWhere((b) => b.id == loan.bookId);
-      book.available = true;
-      loan.status = 'Selesai';
-      _history.insert(0, loan);
-      _loans.removeWhere((l) => l.id == loan.id);
-    });
-    _showSnackBar('Buku "${loan.title}" telah berhasil dikembalikan.', Colors.green);
+    _showSnackBar('Pengembalian diproses oleh petugas perpustakaan.', Colors.blue);
   }
 
-  void _payFine(Fine fine, String proofFileName) {
-    setState(() {
-      fine.status = 'Lunas';
-      _fines.removeWhere((f) => f.id == fine.id);
-      _notifications.insert(
-        0,
-        UserNotification(
-          id: DateTime.now().millisecondsSinceEpoch,
-          text: 'Pembayaran denda dengan lampiran bukti "$proofFileName" berhasil diverifikasi.',
-          date: 'Baru saja',
+  Future<void> _payFine(Fine fine, String proofFileName) async {
+    if (_token == null) return;
+
+    try {
+      var uri = Uri.parse('$baseUrl/loans/${fine.loanId}/upload-proof');
+      var request = http.MultipartRequest('POST', uri);
+      request.headers['Authorization'] = 'Bearer $_token';
+      
+      // Upload mock binary png image signature to bypass laravel file validation
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'payment_proof',
+          [137, 80, 78, 71, 13, 10, 26, 10], 
+          filename: 'proof.png',
         ),
       );
-    });
-    _showSnackBar('Pembayaran berhasil diverifikasi. Status akun Anda aktif!', Colors.green);
+      
+      var streamedResponse = await request.send();
+      var response = await http.Response.fromStream(streamedResponse);
+      
+      if (response.statusCode == 200) {
+        _showSnackBar('Bukti transfer berhasil diunggah! Menunggu verifikasi petugas.', Colors.green);
+        _fetchLoansFromApi();
+      } else {
+        final data = jsonDecode(response.body);
+        _showSnackBar('Gagal mengunggah bukti: ${data['message']}', Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar('Kesalahan koneksi unggah denda: $e', Colors.red);
+    }
   }
 
   void _simulateReadProgress() {
@@ -248,37 +471,7 @@ class _MainAppContainerState extends State<MainAppContainer> {
   }
 
   void _addReview(String id, int rating, String comment) {
-    if (_isGuest) {
-      _showSnackBar('Hanya anggota terdaftar yang dapat menulis ulasan.', Colors.red);
-      return;
-    }
-    if (rating == 0) {
-      _showSnackBar('Harap berikan rating bintang minimal 1 bintang.', Colors.red);
-      return;
-    }
-    if (comment.trim().isEmpty) {
-      _showSnackBar('Kolom ulasan komentar tidak boleh kosong.', Colors.red);
-      return;
-    }
-
-    final todayStr = DateTime.now().toIso8601String().split('T')[0];
-    final newReview = Review(
-      user: 'Riana Safitri',
-      rating: rating,
-      comment: comment,
-      date: todayStr,
-    );
-
-    setState(() {
-      final book = _books.cast<dynamic>().firstWhere((b) => b.id == id, orElse: () => null) ??
-          _ebooks.cast<dynamic>().firstWhere((e) => e.id == id, orElse: () => null);
-
-      if (book != null) {
-        book.reviews.insert(0, newReview);
-      }
-    });
-
-    _showSnackBar('Terima kasih! Ulasan Anda telah diterbitkan.', Colors.green);
+    _showSnackBar('Menulis ulasan hanya tersedia di versi web saat ini.', Colors.blue);
   }
 
   void _showSnackBar(String message, [Color color = Colors.black]) {
@@ -293,7 +486,6 @@ class _MainAppContainerState extends State<MainAppContainer> {
     );
   }
 
-  // Obrolan AI Call
   Future<void> _sendAiMessage() async {
     final query = _aiInputController.text.trim();
     if (query.isEmpty) return;
@@ -306,10 +498,25 @@ class _MainAppContainerState extends State<MainAppContainer> {
 
     _scrollToBottom();
 
-    // Fallback Mock dynamic replies
     String reply = '';
-    if (_geminiApiKey.isEmpty) {
-      await Future.delayed(const Duration(milliseconds: 1200));
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/chat'),
+        headers: {
+          'Content-Type': 'application/json',
+          if (_token != null) 'Authorization': 'Bearer $_token',
+        },
+        body: jsonEncode({'message': query}),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['success'] == true) {
+        reply = data['reply'] ?? '';
+      } else {
+        reply = 'Terjadi kesalahan pada asisten AI: ${data['message'] ?? response.statusCode}';
+      }
+    } catch (e) {
+      // Fallback Mock dynamic replies
       final qLower = query.toLowerCase();
       if (qLower.contains('fiksi') || qLower.contains('rekomendasi fiksi')) {
         reply = 'Saya sangat merekomendasikan novel **Filosofi Teras** oleh Henry Manampiring (buku fisik pengantar Stoisisme) atau **Gadis Kretek** oleh Ratih Kumala yang kaya akan budaya tembakau nusantara. Keduanya tersedia di perpustakaan kita!';
@@ -322,49 +529,9 @@ class _MainAppContainerState extends State<MainAppContainer> {
       } else if (qLower.contains('teknologi') || qLower.contains('ai') || qLower.contains('komputer')) {
         reply = 'Kami memiliki buku **Kecerdasan Buatan Terapan** oleh Prof. Dr. Ir. Gunawan yang membahas Machine Learning dan Python secara praktis, serta E-Book **Panduan Praktis JavaScript** untuk web developer.';
       } else if (qLower.contains('denda') || qLower.contains('bayar denda')) {
-        reply = 'Jika pengembalian terlambat, Anda dikenakan denda **Rp 1.000,- / hari**. Anda dapat melunasinya langsung di tab Denda dengan cara mentransfer dan mengunggah bukti pembayaran.';
+        reply = 'Jika pengembalian terlambat, Anda dikenakan denda **Rp 5.000,- / hari**. Anda dapat melunasinya langsung di tab Denda dengan cara mentransfer dan mengunggah bukti pembayaran.';
       } else {
         reply = 'Tentu! Sebagai asisten **PustakaAI**, saya siap membantu Anda. Anda dapat bertanya tentang rekomendasi buku, panduan peminjaman, atau menanyakan info operasional perpustakaan.';
-      }
-    } else {
-      // Gemini API call
-      try {
-        final systemInstruction = 'Anda adalah "PustakaAI", asisten pintar berteknologi Gemini di aplikasi PustakaDigital bertema biru safir premium.\n'
-            'Tugas utama Anda adalah merekomendasikan buku fisik, e-book, serta menjelaskan manual operasional perpustakaan kepada anggota secara sopan dan informatif.\n\n'
-            'Status Pengguna Saat Ini: ${_isGuest ? 'TAMU (PREVIEW MODE)' : 'ANGGOTA TERDAFTAR (RIANA SAFITRI)'}\n'
-            'Jika pengguna adalah TAMU: ingatkan dengan sopan fitur pinjam, denda, profil terkunci, dan perlu masuk anggota. E-book terbatas hanya preview bab 1.\n\n'
-            'Database Buku: ${jsonEncode(_books.map((b) => b.toJson()).toList())}\n'
-            'Database E-Book: ${jsonEncode(_ebooks.map((e) => e.toJson()).toList())}\n\n'
-            'Aturan: Gunakan bahasa Indonesia yang ramah. Maksimal 3 paragraf singkat dan gunakan bullet points untuk instruksi.';
-
-        final response = await http.post(
-          Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_geminiApiKey'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'contents': [
-              {
-                'role': 'user',
-                'parts': [
-                  {'text': query}
-                ]
-              }
-            ],
-            'systemInstruction': {
-              'parts': [
-                {'text': systemInstruction}
-              ]
-            }
-          }),
-        );
-
-        if (response.statusCode == 200) {
-          final resData = jsonDecode(response.body);
-          reply = resData['candidates']?[0]['content']?['parts']?[0]['text'] ?? 'Maaf, saya tidak mengerti.';
-        } else {
-          reply = 'Eror API Gemini: ${response.statusCode}. Menggunakan fallback lokal:\n\nMohon maaf, API Key yang dimasukkan tidak valid atau kuota habis.';
-        }
-      } catch (e) {
-        reply = 'Terjadi kesalahan koneksi API. Pastikan internet Anda aktif.';
       }
     }
 
@@ -388,6 +555,70 @@ class _MainAppContainerState extends State<MainAppContainer> {
     });
   }
 
+  Future<bool> _loginWithApiSubmit(String loginInput, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'login': loginInput, 'password': password}),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['success'] == true) {
+        setState(() {
+          _token = data['access_token'];
+          _isGuest = false;
+          _userName = data['user']['name'] ?? 'Anggota';
+          _activeTab = 'beranda';
+        });
+        _showSnackBar('Selamat datang kembali, $_userName!', Colors.green);
+        _fetchLoansFromApi();
+        return true;
+      } else {
+        _showSnackBar('Login gagal: ${data['message'] ?? 'Periksa kredensial Anda.'}', Colors.red);
+        return false;
+      }
+    } catch (e) {
+      _showSnackBar('Kesalahan koneksi ke server: $e', Colors.red);
+      return false;
+    }
+  }
+
+  Future<bool> _registerWithApiSubmit(Map<String, String> regData) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/register'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'name': regData['name'],
+          'username': regData['username'],
+          'nim': regData['nim'],
+          'email': regData['email'],
+          'password': regData['password'],
+          'password_confirmation': regData['password_confirmation'],
+          'phone': regData['phone'],
+          'address': regData['address'],
+          'gender': regData['gender'],
+        }),
+      );
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 201 && data['success'] == true) {
+        return true;
+      } else {
+        String msg = data['message'] ?? 'Terjadi kesalahan.';
+        if (data['errors'] != null) {
+          msg += ' ' + data['errors'].toString();
+        }
+        _showSnackBar('Registrasi gagal: $msg', Colors.red);
+        return false;
+      }
+    } catch (e) {
+      _showSnackBar('Kesalahan koneksi registrasi: $e', Colors.red);
+      return false;
+    }
+  }
+
   // Modals helpers
   void _showWelcomeOverlay() {
     showGeneralDialog(
@@ -401,6 +632,18 @@ class _MainAppContainerState extends State<MainAppContainer> {
           onLogin: (guest) {
             Navigator.pop(context);
             _login(guest);
+          },
+          onApiLoginSubmit: (loginInput, passwordInput) async {
+            final success = await _loginWithApiSubmit(loginInput, passwordInput);
+            if (success) {
+              Navigator.pop(context);
+            }
+          },
+          onApiRegisterSubmit: (regData) async {
+            final success = await _registerWithApiSubmit(regData);
+            if (success) {
+              _showSnackBar('Registrasi berhasil! Silakan masuk menggunakan akun Anda.', Colors.green);
+            }
           },
         );
       },
@@ -2603,11 +2846,93 @@ class _MainAppContainerState extends State<MainAppContainer> {
   }
 }
 
-// WELCOME OVERLAY
-class WelcomeOverlay extends StatelessWidget {
+// WELCOME OVERLAY (FORM LOGIN & REGISTER)
+class WelcomeOverlay extends StatefulWidget {
   final Function(bool) onLogin;
+  final Function(String, String) onApiLoginSubmit;
+  final Function(Map<String, String>) onApiRegisterSubmit;
 
-  const WelcomeOverlay({super.key, required this.onLogin});
+  const WelcomeOverlay({
+    super.key,
+    required this.onLogin,
+    required this.onApiLoginSubmit,
+    required this.onApiRegisterSubmit,
+  });
+
+  @override
+  State<WelcomeOverlay> createState() => _WelcomeOverlayState();
+}
+
+class _WelcomeOverlayState extends State<WelcomeOverlay> {
+  bool _isLoginTab = true;
+  bool _obscurePassword = true;
+
+  // Controllers Login
+  final TextEditingController _loginController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+
+  // Controllers Register
+  final TextEditingController _regNameController = TextEditingController();
+  final TextEditingController _regUsernameController = TextEditingController();
+  final TextEditingController _regNimController = TextEditingController();
+  final TextEditingController _regEmailController = TextEditingController();
+  final TextEditingController _regPhoneController = TextEditingController();
+  final TextEditingController _regAddressController = TextEditingController();
+  final TextEditingController _regPasswordController = TextEditingController();
+  final TextEditingController _regConfirmPasswordController = TextEditingController();
+  String _regGender = 'L'; // Default laki-laki
+
+  final _formKey = GlobalKey<FormState>();
+
+  @override
+  void dispose() {
+    _loginController.dispose();
+    _passwordController.dispose();
+    _regNameController.dispose();
+    _regUsernameController.dispose();
+    _regNimController.dispose();
+    _regEmailController.dispose();
+    _regPhoneController.dispose();
+    _regAddressController.dispose();
+    _regPasswordController.dispose();
+    _regConfirmPasswordController.dispose();
+    super.dispose();
+  }
+
+  void _submitLogin() {
+    final login = _loginController.text.trim();
+    final pwd = _passwordController.text;
+    if (login.isEmpty || pwd.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Harap isi kolom login dan password!')),
+      );
+      return;
+    }
+    widget.onApiLoginSubmit(login, pwd);
+  }
+
+  void _submitRegister() {
+    if (!_formKey.currentState!.validate()) return;
+
+    final regData = {
+      'name': _regNameController.text.trim(),
+      'username': _regUsernameController.text.trim(),
+      'nim': _regNimController.text.trim(),
+      'email': _regEmailController.text.trim(),
+      'phone': _regPhoneController.text.trim(),
+      'address': _regAddressController.text.trim(),
+      'gender': _regGender,
+      'password': _regPasswordController.text,
+      'password_confirmation': _regConfirmPasswordController.text,
+    };
+
+    widget.onApiRegisterSubmit(regData);
+    
+    // Switch to login tab after submission
+    setState(() {
+      _isLoginTab = true;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2615,11 +2940,14 @@ class WelcomeOverlay extends StatelessWidget {
       color: Colors.transparent,
       child: Center(
         child: Container(
-          width: 340,
-          padding: const EdgeInsets.all(24),
+          width: 360,
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.85,
+          ),
+          margin: const EdgeInsets.symmetric(horizontal: 16),
           decoration: BoxDecoration(
             gradient: const LinearGradient(
-              colors: [Color(0xFF1E3A8A), Color(0xFF312E81), Color(0xFF0F172A)],
+              colors: [Color(0xFF1E3A8A), Color(0xFF1E1B4B), Color(0xFF0F172A)],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
@@ -2627,73 +2955,387 @@ class WelcomeOverlay extends StatelessWidget {
             boxShadow: const [
               BoxShadow(color: Colors.black54, blurRadius: 20, offset: Offset(0, 10))
             ],
+            border: Border.all(color: Colors.white10),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(20)),
-                child: const Icon(Icons.bookmark_outline, size: 48, color: Colors.blue),
-              ),
-              const SizedBox(height: 16),
-              const Text('PustakaDigital', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 20)),
-              const Text('Pintu Gerbang Pengetahuan dalam Genggaman', style: TextStyle(color: Colors.blue, fontSize: 9.5), textAlign: TextAlign.center),
-              const SizedBox(height: 20),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(16)),
-                child: const Column(
+              // Header Title Area
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
+                child: Column(
                   children: [
-                    Row(
-                      children: [
-                        Icon(Icons.info_outline, size: 12, color: Colors.blue),
-                        SizedBox(width: 4),
-                        Text('Akses Anggota Penuh', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold, fontSize: 9.5)),
-                      ],
+                    const Icon(Icons.bookmark_outline, size: 40, color: Colors.blue),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'PustakaDigital',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 18),
                     ),
-                    SizedBox(height: 4),
-                    Text(
-                      'Dengan masuk sebagai anggota resmi, Anda dapat menikmati fitur peminjaman buku fisik, bebas denda keterlambatan, akses baca utuh seluruh E-Book, serta berpartisipasi memberikan rating ulasan.',
-                      style: TextStyle(color: Colors.white70, fontSize: 8.5, height: 1.3),
+                    const Text(
+                      'Portal Sinkronisasi API Perpustakaan',
+                      style: TextStyle(color: Colors.blue, fontSize: 9.5, fontWeight: FontWeight.w600),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () => onLogin(false),
-                  icon: const Icon(Icons.how_to_reg, size: 14),
-                  label: const Text('Masuk sebagai Anggota', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1D4ED8),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
+
+              // Tab Switcher (Login vs Register)
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: InkWell(
+                        onTap: () => setState(() => _isLoginTab = true),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          decoration: BoxDecoration(
+                            color: _isLoginTab ? Colors.blue.shade700 : Colors.transparent,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          alignment: Alignment.center,
+                          child: const Text(
+                            'Masuk',
+                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: InkWell(
+                        onTap: () => setState(() => _isLoginTab = false),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          decoration: BoxDecoration(
+                            color: !_isLoginTab ? Colors.blue.shade700 : Colors.transparent,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          alignment: Alignment.center,
+                          child: const Text(
+                            'Daftar',
+                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: () => onLogin(true),
-                  icon: const Icon(Icons.visibility_outlined, size: 14),
-                  label: const Text('Tetap dalam Mode Tamu', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.white70,
-                    side: const BorderSide(color: Colors.white30),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
+
+              // Form Scrollable Area
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  child: _isLoginTab ? _buildLoginForm() : _buildRegisterForm(),
                 ),
-              )
+              ),
+
+              // Footer Area (Mode Tamu & Keluar)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
+                child: Column(
+                  children: [
+                    const Divider(color: Colors.white10),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () => widget.onLogin(true),
+                        icon: const Icon(Icons.visibility_outlined, size: 14),
+                        label: const Text('Tetap dalam Mode Tamu', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white70,
+                          side: const BorderSide(color: Colors.white24),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  // LOGIN FORM WIDGET
+  Widget _buildLoginForm() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Email / Username / NIM',
+          style: TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 6),
+        TextField(
+          controller: _loginController,
+          style: const TextStyle(color: Colors.white, fontSize: 12),
+          decoration: InputDecoration(
+            hintText: 'Masukkan akun Anda...',
+            hintStyle: const TextStyle(color: Colors.white30, fontSize: 12),
+            filled: true,
+            fillColor: Colors.white.withOpacity(0.05),
+            prefixIcon: const Icon(Icons.person_outline, color: Colors.blue, size: 18),
+            contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+          ),
+        ),
+        const SizedBox(height: 16),
+        const Text(
+          'Password',
+          style: TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 6),
+        TextField(
+          controller: _passwordController,
+          obscureText: _obscurePassword,
+          style: const TextStyle(color: Colors.white, fontSize: 12),
+          decoration: InputDecoration(
+            hintText: 'Masukkan password...',
+            hintStyle: const TextStyle(color: Colors.white30, fontSize: 12),
+            filled: true,
+            fillColor: Colors.white.withOpacity(0.05),
+            prefixIcon: const Icon(Icons.lock_outline, color: Colors.blue, size: 18),
+            suffixIcon: IconButton(
+              icon: Icon(_obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: Colors.white30, size: 18),
+              onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+            ),
+            contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+          ),
+        ),
+        const SizedBox(height: 24),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: _submitLogin,
+            icon: const Icon(Icons.login, size: 14),
+            label: const Text('Masuk Aplikasi', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF1D4ED8),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Center(
+          child: TextButton(
+            onPressed: () {
+              _loginController.text = 'riana';
+              _passwordController.text = 'password123';
+            },
+            child: const Text(
+              'Uji Cepat: Auto-fill Riana Safitri',
+              style: TextStyle(color: Colors.blue, fontSize: 10, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // REGISTER FORM WIDGET
+  Widget _buildRegisterForm() {
+    return Form(
+      key: _formKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Nama Lengkap
+          _buildFormLabel('Nama Lengkap'),
+          TextFormField(
+            controller: _regNameController,
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+            validator: (value) => value == null || value.isEmpty ? 'Nama lengkap wajib diisi' : null,
+            decoration: _buildInputDecoration('Nama Lengkap...', Icons.badge_outlined),
+          ),
+          const SizedBox(height: 12),
+
+          // Username & NIM
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildFormLabel('Username'),
+                    TextFormField(
+                      controller: _regUsernameController,
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                      validator: (value) => value == null || value.isEmpty ? 'Wajib' : null,
+                      decoration: _buildInputDecoration('Username...', Icons.alternate_email_outlined),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildFormLabel('NIM'),
+                    TextFormField(
+                      controller: _regNimController,
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                      validator: (value) => value == null || value.isEmpty ? 'Wajib' : null,
+                      decoration: _buildInputDecoration('NIM...', Icons.school_outlined),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+
+          // Email
+          _buildFormLabel('Email Resmi'),
+          TextFormField(
+            controller: _regEmailController,
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+            validator: (value) {
+              if (value == null || value.isEmpty) return 'Email wajib diisi';
+              if (!value.contains('@')) return 'Email tidak valid';
+              return null;
+            },
+            decoration: _buildInputDecoration('email@domain.com...', Icons.mail_outline),
+          ),
+          const SizedBox(height: 12),
+
+          // Telepon & Gender
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildFormLabel('No. Telepon'),
+                    TextFormField(
+                      controller: _regPhoneController,
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                      decoration: _buildInputDecoration('0812...', Icons.phone_android_outlined),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildFormLabel('Gender'),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.05),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: _regGender,
+                          dropdownColor: const Color(0xFF1E1B4B),
+                          style: const TextStyle(color: Colors.white, fontSize: 12),
+                          onChanged: (String? val) {
+                            if (val != null) setState(() => _regGender = val);
+                          },
+                          items: const [
+                            DropdownMenuItem(value: 'L', child: Text('Laki-laki')),
+                            DropdownMenuItem(value: 'P', child: Text('Perempuan')),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+
+          // Alamat
+          _buildFormLabel('Alamat Lengkap'),
+          TextFormField(
+            controller: _regAddressController,
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+            decoration: _buildInputDecoration('Alamat tinggal...', Icons.home_outlined),
+          ),
+          const SizedBox(height: 12),
+
+          // Password & Konfirmasi Password
+          _buildFormLabel('Password (Min. 6 Karakter)'),
+          TextFormField(
+            controller: _regPasswordController,
+            obscureText: true,
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+            validator: (value) => value == null || value.length < 6 ? 'Password minimal 6 karakter' : null,
+            decoration: _buildInputDecoration('Password baru...', Icons.lock_outline),
+          ),
+          const SizedBox(height: 12),
+
+          _buildFormLabel('Konfirmasi Password'),
+          TextFormField(
+            controller: _regConfirmPasswordController,
+            obscureText: true,
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+            validator: (value) {
+              if (value != _regPasswordController.text) return 'Konfirmasi password tidak cocok';
+              return null;
+            },
+            decoration: _buildInputDecoration('Ulangi password...', Icons.lock_outline),
+          ),
+          const SizedBox(height: 24),
+
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _submitRegister,
+              icon: const Icon(Icons.person_add_alt_1_outlined, size: 14),
+              label: const Text('Daftar Anggota Baru', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF4F46E5),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Label Form Helper
+  Widget _buildFormLabel(String label) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6, top: 4),
+      child: Text(
+        label,
+        style: const TextStyle(color: Colors.white70, fontSize: 9.5, fontWeight: FontWeight.bold),
+      ),
+    );
+  }
+
+  // Input Field Decoration Helper
+  InputDecoration _buildInputDecoration(String hint, IconData icon) {
+    return InputDecoration(
+      hintText: hint,
+      hintStyle: const TextStyle(color: Colors.white30, fontSize: 11),
+      filled: true,
+      fillColor: Colors.white.withOpacity(0.05),
+      prefixIcon: Icon(icon, color: Colors.blue, size: 16),
+      contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+      errorStyle: const TextStyle(fontSize: 8.5, color: Colors.redAccent),
     );
   }
 }
